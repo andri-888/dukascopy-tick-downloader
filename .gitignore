@@ -1,0 +1,9 @@
+# Local environment configuration variables
+.env
+
+# Dependency directories
+node_modules/
+
+# Log files and local test outputs
+*.log
+.DS_Store
