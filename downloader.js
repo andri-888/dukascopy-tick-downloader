@@ -12,6 +12,7 @@ const END_YEAR = 2026;
 const END_MONTH = 6; 
 const COOLDOWN_MS = 60000; // 60 seconds strict cooldown delay
 const MAX_RETRIES = 3;     // Maximum download attempts on connection failure
+const NETWORK_TIMEOUT_MS = 30000; // 30 seconds hard timeout guard
 
 // Read storage path from local environment configuration
 const OUTPUT_DIR = process.env.OUTPUT_DIR;
@@ -23,16 +24,39 @@ function formatUTC(dateObj) {
 }
 
 /**
- * Robust fetch mechanism featuring an automated recursive retry policy
+ * Robust fetch mechanism featuring a strict network timeout barrier
+ * and an automated recursive retry policy
  */
 async function fetchWithRetry(config, retriesLeft = MAX_RETRIES) {
+    const controller = new AbortController();
+    
+    // Set an automated countdown alarm to force abort the request if hung
+    const timeoutId = setTimeout(() => {
+        controller.abort();
+    }, NETWORK_TIMEOUT_MS);
+
     try {
-        return await getHistoricalRates(config);
+        // Inject the abort controller signal into the dukascopy-node configuration matrix
+        const data = await getHistoricalRates({
+            ...config,
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId); // Deactivate the alarm upon successful download execution
+        return data;
+
     } catch (err) {
+        clearTimeout(timeoutId); // Deactivate the alarm to clear memory cache leaks
+
+        const isTimeout = err.name === 'AbortError' || err.message.includes('aborted');
+        const errorMessage = isTimeout ? 'Network Request Timeout (Server Unresponsive)' : err.message;
+
         if (retriesLeft <= 1) {
-            throw new Error(`[TOTAL FAILURE] Request failed after ${MAX_RETRIES} attempts. Error: ${err.message}`);
+            throw new Error(`[TOTAL FAILURE] Request failed permanently after ${MAX_RETRIES} attempts. Error: ${errorMessage}`);
         }
-        console.log(`[RETRY WARN] Connection failed (${err.message}). Retrying in 5 seconds... (Attempts remaining: ${retriesLeft - 1})`);
+
+        console.log(`[RETRY WARN] Connection issue detected (${errorMessage}). Retrying in 5 seconds... (Attempts remaining: ${retriesLeft - 1})`);
+        
         await delay(5000); 
         return await fetchWithRetry(config, retriesLeft - 1);
     }
@@ -65,9 +89,9 @@ async function startAutomatedPipeline() {
             console.log(`[CHECKING] Inspecting file status: ${fileLabel}.csv`);
             console.log(`==================================================================`);
 
-            // SMART DETECTION: Avoid redundant bandwidth consumption
+            // SMART DETECTION: Avoid redundant bandwidth and time consumption
             if (fs.existsSync(targetCsvPath)) {
-                console.log(`[SKIP INFO] File ${fileLabel}.csv already exists. Skipping network request...`);
+                console.log(`[SKIP INFO] File ${fileLabel}.csv already exists locally. Skipping network request...`);
                 continue; 
             }
 
